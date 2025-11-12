@@ -10,7 +10,7 @@ from notion_client.errors import APIResponseError
 
 # --- Configuration ---
 # Change these strings to match the property names in your Notion database.
-TITLE_PROP = "Name"        # The name of your database's Title property
+TITLE_PROP = "Title"        # The name of your database's Title property
 TYPE_PROP = "Type"         # A 'Select' property for the item type
 TAGS_PROP = "Tags"         # A 'Multi-select' property for tags
 
@@ -41,14 +41,14 @@ def parse_date_input(date_str: str | None) -> datetime.date:
     except ValueError:
         raise SystemExit(f"Invalid date format: '{date_str}'. Please use dd.mm.yyyy.")
 
-def get_all_database_pages(database_id: str):
+def get_all_database_pages(database_id: str, filter: str):
     """Generator to yield all pages from a database, handling pagination."""
     next_cursor = None
     db = client.databases.retrieve(database_id=database_id)
     print(f"Getting data from {db['data_sources'][0]}")
     while True:
         try:
-            response = client.data_sources.query(data_source_id=db['data_sources'][0]['id'])
+            response = client.data_sources.query(data_source_id=db['data_sources'][0]['id'], filter=filter, next_cursor=next_cursor)
             yield from response.get("results", [])
             next_cursor = response.get("next_cursor")
             if not response.get("has_more"):
@@ -76,9 +76,12 @@ def extract_text_from_block(block: dict) -> str:
 def get_page_title(page: dict) -> str:
     """Extracts the plain text title from a page object."""
     properties = page.get("properties", {})
-    if TITLE_PROP in properties and properties[TITLE_PROP]["type"] == "title":
-        return "".join(t.get("plain_text", "") for t in properties[TITLE_PROP]["title"])
-    return "Untitled"
+    retval = "Untitled"
+    try:
+       retval = properties[TITLE_PROP]["title"][0]["text"]["content"]
+    except:
+        pass # There is apparently no title for this page 
+    return retval
 
 def check_for_duplicate_todo(todo_text: str, source_page_id: str):
     """
@@ -86,15 +89,15 @@ def check_for_duplicate_todo(todo_text: str, source_page_id: str):
     This is a heuristic to prevent creating the same item multiple times.
     """
     try:
-        response = client.databases.query(
-            database_id=NOTION_DATABASE_ID,
-            filter={
-                "and": [
-                    {"property": TAGS_PROP, "multi_select": {"contains": "Auto Generated"}},
-                    {"property": TITLE_PROP, "title": {"contains": todo_text[:50]}} # Check against a substring
-                ]
-            }
-        )
+        db = client.databases.retrieve(database_id=NOTION_DATABASE_ID)
+        filter={
+            "and": [
+                {"property": TAGS_PROP, "multi_select": {"contains": "Auto Generated"}},
+                {"property": TITLE_PROP, "title": {"contains": todo_text[:50]}} # Check against a substring
+            ]
+        }
+        response = client.data_sources.query(data_source_id=db['data_sources'][0]['id'], filter=filter)
+
         # Further check if any result links back to the same source page
         for page in response.get("results", []):
             page_content = get_page_blocks(page["id"])
@@ -159,31 +162,25 @@ def main():
         description="Scan a Notion database for pages created on a specific date and extract TODOs."
     )
     parser.add_argument(
-        "date",
+        "--date",
         nargs="?",
         default=None,
-        help="Date in dd.mm.yyyy format. If omitted, defaults to today.",
+        help="Date in dd.mm.yyyy format. If omitted, defaults to today."
     )
     args = parser.parse_args()
 
     target_date = parse_date_input(args.date)
     print(f"Scanning Notion database for pages created on: {target_date.strftime('%d.%m.%Y')}")
 
-    pages_on_date = []
-    for page in get_all_database_pages(NOTION_DATABASE_ID):
-        created_time_str = page.get("created_time")
-        if created_time_str:
-            page_date = datetime.fromisoformat(created_time_str.replace("Z", "+00:00")).date()
-            if page_date == target_date:
-                pages_on_date.append(page)
+    # Use server side filtering
+    date_filter = {
+        "property": "Created", 
+        "created_time": {
+            "equals": target_date.isoformat()
+        }
+    }
 
-    if not pages_on_date:
-        print("No pages found for the specified date.")
-        return
-
-    print(f"Found {len(pages_on_date)} page(s) to scan...")
-
-    for page in pages_on_date:
+    for page in get_all_database_pages(NOTION_DATABASE_ID, date_filter):
         page_title = get_page_title(page)
         print(f"Scanning page: '{page_title}'")
         
