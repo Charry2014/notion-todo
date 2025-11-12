@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# notion_todo_importer.py (v3 - with pagination fix)
+# notion_todo_importer.py (v5 - marks original TODO as DONE)
 
 import os
 import argparse
@@ -10,7 +10,7 @@ from notion_client.errors import APIResponseError
 
 # --- Configuration ---
 # Change these strings to match the property names in your Notion database.
-TITLE_PROP = "Name"        # The name of your database's Title property
+TITLE_PROP = "Title"        # The name of your database's Title property
 TYPE_PROP = "Type"         # A 'Select' property for the item type
 TAGS_PROP = "Tags"         # A 'Multi-select' property for tags
 
@@ -41,18 +41,15 @@ def parse_date_input(date_str: str | None) -> datetime.date:
     except ValueError:
         raise SystemExit(f"Invalid date format: '{date_str}'. Please use dd.mm.yyyy.")
 
-def get_all_database_pages(database_id: str):
-    """Generator to yield all pages from a database, handling pagination correctly."""
+def get_filtered_database_pages(database_id: str, filter_obj: dict):
+    """Generator to yield pages from a database that match a filter."""
     next_cursor = None
     while True:
         try:
-            # Build query parameters, only including start_cursor if it exists
-            query_params = {"database_id": database_id}
+            query_params = {"database_id": database_id, "filter": filter_obj, "page_size": 100}
             if next_cursor:
                 query_params["start_cursor"] = next_cursor
-
             response = client.databases.query(**query_params)
-
             yield from response.get("results", [])
             next_cursor = response.get("next_cursor")
             if not response.get("has_more"):
@@ -62,18 +59,15 @@ def get_all_database_pages(database_id: str):
             break
 
 def get_page_blocks(page_id: str):
-    """Fetches all top-level blocks from a page, handling pagination correctly."""
+    """Fetches all top-level blocks from a page, handling pagination."""
     all_blocks = []
     next_cursor = None
     while True:
         try:
-            # Build query parameters, only including start_cursor if it exists
-            query_params = {"block_id": page_id}
+            query_params = {"block_id": page_id, "page_size": 100}
             if next_cursor:
                 query_params["start_cursor"] = next_cursor
-
             response = client.blocks.children.list(**query_params)
-            
             all_blocks.extend(response.get("results", []))
             next_cursor = response.get("next_cursor")
             if not response.get("has_more"):
@@ -93,61 +87,58 @@ def extract_text_from_block(block: dict) -> str:
 def get_page_title(page: dict) -> str:
     """Extracts the plain text title from a page object."""
     properties = page.get("properties", {})
-    if TITLE_PROP in properties and properties[TITLE_PROP]["type"] == "title":
-        return "".join(t.get("plain_text", "") for t in properties[TITLE_PROP]["title"])
-    return "Untitled"
-
-def check_for_duplicate_todo(todo_text: str, source_page_id: str):
-    """Checks if an auto-generated TODO for this source page and text already exists."""
+    retval = "Untitled"
     try:
-        # A simple filter to narrow down the search space
-        response = client.databases.query(
-            database_id=NOTION_DATABASE_ID,
-            filter={
-                "and": [
-                    {"property": TAGS_PROP, "multi_select": {"contains": "Auto Generated"}},
-                    {"property": TITLE_PROP, "title": {"contains": "TODO"}}
-                ]
-            }
-        )
+       retval = properties[TITLE_PROP]["title"][0]["text"]["content"]
+    except:
+        pass # There is apparently no title for this page 
+    return retval
+
+def mark_todo_as_done(block: dict):
+    """Updates a block to replace 'TODO' with 'DONE' and checks the box if applicable."""
+    block_id = block["id"]
+    block_type = block["type"]
+    original_rich_text = block[block_type].get("rich_text", [])
+
+    # Create a new rich_text array with the keyword replaced
+    new_rich_text = []
+    for text_obj in original_rich_text:
+        original_content = text_obj.get("text", {}).get("content", "")
+        # Replace only the first occurrence of a TODO pattern in the text segment
+        modified_content = TODO_PATTERNS.sub("DONE", original_content, count=1)
         
-        # Now, more accurately check the results
-        for page in response.get("results", []):
-            page_blocks = get_page_blocks(page["id"])
-            # Check if the body of the TODO page contains the same text
-            body_text_match = any(todo_text in extract_text_from_block(b) for b in page_blocks)
-            # Check if it links back to the same source page
-            source_link_match = False
-            for block in page_blocks:
-                if "paragraph" in block:
-                    for rt in block["paragraph"]["rich_text"]:
-                        link_url = rt.get("text", {}).get("link", {}).get("url", "")
-                        if source_page_id.replace("-", "") in link_url:
-                            source_link_match = True
-                            break
-                if source_link_match:
-                    break
-            
-            if body_text_match and source_link_match:
-                return True # Confirmed duplicate
-        return False
+        # Create a new text object; do not modify the original in place
+        new_text_obj = text_obj.copy()
+        new_text_obj["text"]["content"] = modified_content
+        new_rich_text.append(new_text_obj)
+
+    # Construct the payload for the update API call
+    update_payload = {
+        block_type: {
+            "rich_text": new_rich_text
+        }
+    }
+
+    # If it's a to_do block, also mark it as checked
+    if block_type == "to_do":
+        update_payload[block_type]["checked"] = True
+
+    try:
+        client.blocks.update(block_id=block_id, **update_payload)
+        print("    -> Marked original item as DONE.")
+        return True
     except APIResponseError as e:
-        print(f"Warning: Could not check for duplicates due to API error: {e}")
+        print(f"    -> Failed to mark original as DONE. Error: {e}")
         return False
 
-def create_todo_page(source_page: dict, todo_text: str, counter: int):
-    """Creates a new page in the database for a found TODO item."""
+def create_todo_page(source_page: dict, todo_text: str, counter: int) -> bool:
+    """Creates a new page and returns True on success, False on failure."""
     source_page_id = source_page["id"]
     source_page_title = get_page_title(source_page)
     source_page_url = source_page.get("url", f"https://www.notion.so/{source_page_id.replace('-', '')}")
-
     new_page_title = f"TODO {source_page_title} {counter:02d}"
 
     print(f"  - Found TODO: '{todo_text}'")
-
-    if check_for_duplicate_todo(todo_text, source_page_id):
-        print("    -> Skipping, duplicate already exists.")
-        return
 
     try:
         client.pages.create(
@@ -158,45 +149,34 @@ def create_todo_page(source_page: dict, todo_text: str, counter: int):
                 TAGS_PROP: {"multi_select": [{"name": "Auto Generated"}]},
             },
             children=[
-                {
-                    "object": "block", "type": "paragraph",
-                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": todo_text}}]},
-                },
-                {
-                    "object": "block", "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [
-                            {"type": "text", "text": {"content": "Source: "}},
-                            {"type": "text", "text": {"content": "Link to original page", "link": {"url": source_page_url}}},
-                        ]
-                    },
-                },
+                {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": todo_text}}]}},
+                {"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": "Source: "}}, {"type": "text", "text": {"content": "Link to original page", "link": {"url": source_page_url}}}]}},
             ],
         )
         print("    -> Created new To-Do page.")
+        return True # Return True on success
     except APIResponseError as e:
         print(f"    -> Failed to create page. Error: {e}")
+        return False # Return False on failure
 
 def main():
     parser = argparse.ArgumentParser(
         description="Scan a Notion database for pages created on a specific date and extract TODOs."
     )
     parser.add_argument(
-        "date", nargs="?", default=None,
-        help="Date in dd.mm.yyyy format. If omitted, defaults to today.",
+        "--date",
+        nargs="?",
+        default=None,
+        help="Date in dd.mm.yyyy format. If omitted, defaults to today."
     )
     args = parser.parse_args()
 
     target_date = parse_date_input(args.date)
-    print(f"Scanning Notion database for pages created on: {target_date.strftime('%d.%m.%Y')}")
+    print(f"Querying Notion for pages created on: {target_date.strftime('%Y-%m-%d')}
+")
 
-    pages_on_date = []
-    for page in get_all_database_pages(NOTION_DATABASE_ID):
-        created_time_str = page.get("created_time")
-        if created_time_str:
-            page_date = datetime.fromisoformat(created_time_str.replace("Z", "+00:00")).date()
-            if page_date == target_date:
-                pages_on_date.append(page)
+    date_filter = {"property": "Created time", "created_time": {"equals": target_date.isoformat()}}
+    pages_on_date = list(get_filtered_database_pages(NOTION_DATABASE_ID, date_filter))
 
     if not pages_on_date:
         print("No pages found for the specified date.")
@@ -206,23 +186,29 @@ def main():
 
     for page in pages_on_date:
         page_title = get_page_title(page)
-        print(f"Scanning page: '{page_title}'")
+        print(f"
+Scanning page: '{page_title}'")
         
         blocks = get_page_blocks(page["id"])
         todo_counter = 1
-        found_todos = False
-
+        
+        # --- REVISED LOGIC ---
+        # Iterate through blocks, not lines of text
         for block in blocks:
             text_content = extract_text_from_block(block)
-            for line in text_content.splitlines():
-                if TODO_PATTERNS.search(line):
-                    found_todos = True
-                    clean_line = re.sub(r"^\s*\[\s*[xX]?\s*\]\s*", "", line).strip()
-                    create_todo_page(page, clean_line, todo_counter)
+            
+            # Check if this block contains a TODO
+            if TODO_PATTERNS.search(text_content):
+                # We found a block with a TODO. Process it.
+                clean_line = re.sub(r"^\s*\[\s*[xX]?\s*\]\s*", "", text_content).strip()
+
+                # Step 1: Try to create the new To-Do page
+                is_successful = create_todo_page(page, clean_line, todo_counter)
+                
+                # Step 2: If successful, update the original block
+                if is_successful:
+                    mark_todo_as_done(block)
                     todo_counter += 1
-        
-        if not found_todos:
-            print("  - No TODOs found on this page.")
 
 if __name__ == "__main__":
     main()

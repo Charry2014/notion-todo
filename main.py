@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# notion_todo_importer.py
+# notion_todo_importer.py (v5 - marks original TODO as DONE)
 
 import os
 import argparse
@@ -58,13 +58,23 @@ def get_all_database_pages(database_id: str, filter: str):
             break
 
 def get_page_blocks(page_id: str):
-    """Fetches all top-level blocks from a page."""
-    try:
-        response = client.blocks.children.list(block_id=page_id)
-        return response.get("results", [])
-    except APIResponseError as e:
-        print(f"Error fetching blocks for page {page_id}: {e}")
-        return []
+    """Fetches all top-level blocks from a page, handling pagination."""
+    all_blocks = []
+    next_cursor = None
+    while True:
+        try:
+            query_params = {"block_id": page_id, "page_size": 100}
+            if next_cursor:
+                query_params["start_cursor"] = next_cursor
+            response = client.blocks.children.list(**query_params)
+            all_blocks.extend(response.get("results", []))
+            next_cursor = response.get("next_cursor")
+            if not response.get("has_more"):
+                break
+        except APIResponseError as e:
+            print(f"Error fetching blocks for page {page_id}: {e}")
+            break
+    return all_blocks
 
 def extract_text_from_block(block: dict) -> str:
     """Extracts plain text from a Notion block, if available."""
@@ -83,10 +93,48 @@ def get_page_title(page: dict) -> str:
         pass # There is apparently no title for this page 
     return retval
 
+def mark_todo_as_done(block: dict):
+    """Updates a block to replace 'TODO' with 'DONE' and checks the box if applicable."""
+    block_id = block["id"]
+    block_type = block["type"]
+    original_rich_text = block[block_type].get("rich_text", [])
+
+    # Create a new rich_text array with the keyword replaced
+    new_rich_text = []
+    for text_obj in original_rich_text:
+        original_content = text_obj.get("text", {}).get("content", "")
+        # Replace only the first occurrence of a TODO pattern in the text segment
+        modified_content = TODO_PATTERNS.sub("DONE", original_content, count=1)
+        
+        # Create a new text object; do not modify the original in place
+        new_text_obj = text_obj.copy()
+        new_text_obj["text"]["content"] = modified_content
+        new_rich_text.append(new_text_obj)
+
+    # Construct the payload for the update API call
+    update_payload = {
+        block_type: {
+            "rich_text": new_rich_text
+        }
+    }
+
+    # If it's a to_do block, also mark it as checked
+    if block_type == "to_do":
+        update_payload[block_type]["checked"] = True
+
+    try:
+        client.blocks.update(block_id=block_id, **update_payload)
+        print("    -> Marked original item as DONE.")
+        return True
+    except APIResponseError as e:
+        print(f"    -> Failed to mark original as DONE. Error: {e}")
+        return False
+
 def check_for_duplicate_todo(todo_text: str, source_page_id: str):
     """
     Checks if an auto-generated TODO for this source page and text already exists.
     This is a heuristic to prevent creating the same item multiple times.
+    Unused in the current script, but I chose to leave it here for reference.
     """
     try:
         db = client.databases.retrieve(database_id=NOTION_DATABASE_ID)
@@ -111,8 +159,10 @@ def check_for_duplicate_todo(todo_text: str, source_page_id: str):
         print(f"Warning: Could not check for duplicates due to API error: {e}")
         return False # Fail open to allow creation
 
-def create_todo_page(source_page: dict, todo_text: str, counter: int):
-    """Creates a new page in the database for a found TODO item."""
+def create_todo_page(source_page: dict, todo_text: str, counter: int) -> bool:
+    """Creates a new page in the database for a found TODO item.
+    	returns True on success, False on failure.
+	"""
     source_page_id = source_page["id"]
     source_page_title = get_page_title(source_page)
     source_page_url = source_page.get("url", f"https://www.notion.so/{source_page_id.replace('-', '')}")
@@ -121,9 +171,9 @@ def create_todo_page(source_page: dict, todo_text: str, counter: int):
 
     print(f"  - Found TODO: '{todo_text}'")
 
-    if check_for_duplicate_todo(todo_text, source_page_id):
-        print("    -> Skipping, duplicate already exists.")
-        return
+    #if check_for_duplicate_todo(todo_text, source_page_id):
+    #    print("    -> Skipping, duplicate already exists.")
+    #    return
 
     try:
         client.pages.create(
@@ -154,8 +204,10 @@ def create_todo_page(source_page: dict, todo_text: str, counter: int):
             ],
         )
         print("    -> Created new To-Do page.")
+        return True # Return True on success
     except APIResponseError as e:
         print(f"    -> Failed to create page. Error: {e}")
+        return False # Return False on failure
 
 def main():
     parser = argparse.ArgumentParser(
@@ -195,8 +247,13 @@ def main():
                     found_todos = True
                     # Clean up the line by removing checkbox syntax and extra whitespace
                     clean_line = re.sub(r"^\s*\[\s*[xX]?\s*\]\s*", "", line).strip()
-                    create_todo_page(page, clean_line, todo_counter)
-                    todo_counter += 1
+	                # Step 1: Try to create the new To-Do page
+                    is_successful = create_todo_page(page, clean_line, todo_counter)
+                
+        	        # Step 2: If successful, update the original block
+                    if is_successful:
+                        mark_todo_as_done(block)
+                        todo_counter += 1
         
         if not found_todos:
             print("  - No TODOs found on this page.")
