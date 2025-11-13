@@ -1,6 +1,6 @@
 # Notion TO-DO Finder
 
-Notion is my primary organiser and documentation tool for my work - I have a single database for all work related docuements such as meeting minutes, reminders, to-do items, meeting preparation notes and so on. In the database there is a 'type' field where the entries are categorised. Typically I will be sitting in a meeting, with meeting minutes open, will hear some item that I need to remember to work on and rather than break out into a new Notion page I just make a TODO note in the meeting minutes. But all too often these to-do items got forgotten.
+Notion is my primary organiser and documentation tool for my work - I have a single database for all work related documents such as meeting minutes, reminders, to-do items, meeting preparation notes and so on. In the database there is a 'type' field where the entries are categorised. Typically I will be sitting in a meeting, with meeting minutes open, will hear some item that I need to remember to work on and rather than break out into a new Notion page I just make a TODO note in the meeting minutes. But all too often these to-do items got forgotten.
 
 This helper script extracts TODO notes in database pages and turns them into their own to-do database entries. It runs locally on your computer and accesses your cloud-hosted Notion space. One suggested way to run this script is to use a cron job after the end of the work day to extract all the TODO notes made during the day.
 
@@ -15,6 +15,19 @@ This script is developed and tested on Windows 11 but should work fine on everyt
 main.py [--date dd.mm.yyyy]
 
 If no date argument is given it defaults to today.
+
+## Script Modifications
+
+You may need to adjust the following constants in the script to match your own database -
+
+TITLE_PROP = "Title"        # The name of your database's Title property
+TYPE_PROP = "Type"         # A 'Select' property for the item type
+TAGS_PROP = "Tags"         # A 'Multi-select' property for tags
+
+The TYPE_PROP will be set to 'To-Do' when a new item is created
+The TAGS_PROP will be set to 'Auto Generated' in the new item so new entries can be found easily for review.
+
+Finally, it is quite likely that other adjustments will be needed to your particular database structure and workflow.
 
 ## Setup
 
