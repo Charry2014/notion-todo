@@ -20,11 +20,11 @@ If no date argument is given it defaults to today.
 
 You may need to adjust the following constants in the script to match your own database -
 
-TITLE_PROP = "Title"        # The name of your database's Title property
-TYPE_PROP = "Type"         # A 'Select' property for the item type
-TAGS_PROP = "Tags"         # A 'Multi-select' property for tags
+ * TITLE_PROP = "Title"        # The name of your database's Title property
+ * TYPE_PROP = "Type"         # A 'Select' property for the item type
+ * TAGS_PROP = "Tags"         # A 'Multi-select' property for tags
 
-The TYPE_PROP will be set to 'To-Do' when a new item is created
+The TYPE_PROP will be set to 'To-Do' when a new item is created. 
 The TAGS_PROP will be set to 'Auto Generated' in the new item so new entries can be found easily for review.
 
 Finally, it is quite likely that other adjustments will be needed to your particular database structure and workflow.
