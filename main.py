@@ -13,6 +13,9 @@ from notion_client.errors import APIResponseError
 TITLE_PROP = "Title"        # The name of your database's Title property
 TYPE_PROP = "Type"         # A 'Select' property for the item type
 TAGS_PROP = "Tags"         # A 'Multi-select' property for tags
+# Pages created on the given date will be processed, and any marked as finished
+# on that date also. This property name defines those finished pages.
+FINISH_BEFORE_PROP = "Finish Before" # The name of your custom date property
 
 # --- Environment Variable Setup ---
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
@@ -224,12 +227,15 @@ def main():
     target_date = parse_date_input(args.date)
     print(f"Scanning Notion database for pages created on: {target_date.strftime('%d.%m.%Y')}")
 
+    target_iso_date = target_date.isoformat()
     # Use server side filtering
     date_filter = {
-        "property": "Created", 
-        "created_time": {
-            "equals": target_date.isoformat()
-        }
+        "or": [
+            # Condition 1: The built-in 'Created time' property matches the date.
+            {"property": "Created", "created_time": {"equals": target_iso_date}},
+            # Condition 2: The custom 'Finish Before' date property matches the date.
+            {"property": FINISH_BEFORE_PROP, "date": {"equals": target_iso_date}}
+        ]
     }
 
     for page in get_all_database_pages(NOTION_DATABASE_ID, date_filter):
