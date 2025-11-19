@@ -170,10 +170,11 @@ def create_todo_page(source_page: dict, todo_text: str, counter: int) -> bool:
     source_page_title = get_page_title(source_page)
     source_page_url = source_page.get("url", f"https://www.notion.so/{source_page_id.replace('-', '')}")
 
-    new_page_title = f"TODO {source_page_title} {counter:02d}"
+    new_page_title = f"TODO {todo_text} {counter:02d}"
 
     print(f"  - Found TODO: '{todo_text}'")
 
+    # Duplicate check is currently disabled to avoid false negatives.
     #if check_for_duplicate_todo(todo_text, source_page_id):
     #    print("    -> Skipping, duplicate already exists.")
     #    return
