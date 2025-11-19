@@ -4,7 +4,7 @@
 import os
 import argparse
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from notion_client import Client
 from notion_client.errors import APIResponseError
 
@@ -213,19 +213,8 @@ def create_todo_page(source_page: dict, todo_text: str, counter: int) -> bool:
         print(f"    -> Failed to create page. Error: {e}")
         return False # Return False on failure
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Scan a Notion database for pages created on a specific date and extract TODOs."
-    )
-    parser.add_argument(
-        "--date",
-        nargs="?",
-        default=None,
-        help="Date in dd.mm.yyyy format. If omitted, defaults to today."
-    )
-    args = parser.parse_args()
-
-    target_date = parse_date_input(args.date)
+def process_date(target_date):
+    """Process TODOs for a specific date."""
     print(f"Scanning Notion database for pages created on: {target_date.strftime('%d.%m.%Y')}")
 
     target_iso_date = target_date.isoformat()
@@ -242,7 +231,7 @@ def main():
     for page in get_all_database_pages(NOTION_DATABASE_ID, date_filter):
         page_title = get_page_title(page)
         print(f"Scanning page: '{page_title}'")
-        
+
         blocks = get_page_blocks(page["id"])
         todo_counter = 1
         found_todos = False
@@ -256,14 +245,58 @@ def main():
                     clean_line = re.sub(r"^\s*\[\s*[xX]?\s*\]\s*", "", line).strip()
 	                # Step 1: Try to create the new To-Do page
                     is_successful = create_todo_page(page, clean_line, todo_counter)
-                
+
         	        # Step 2: If successful, update the original block
                     if is_successful:
                         mark_todo_as_done(block)
                         todo_counter += 1
-        
+
         if not found_todos:
             print("  - No TODOs found on this page.")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Scan a Notion database for pages created on a specific date and extract TODOs."
+    )
+    parser.add_argument(
+        "--date",
+        nargs="?",
+        default=None,
+        help="Date in dd.mm.yyyy format. If omitted, defaults to today."
+    )
+    parser.add_argument(
+        "--since",
+        default=None,
+        help="Process all dates from this date (dd.mm.yyyy format) to today."
+    )
+    args = parser.parse_args()
+
+    # Check for mutually exclusive options
+    if args.date and args.since:
+        raise SystemExit("Error: Cannot use both --date and --since options together.")
+
+    if args.since:
+        # Process all dates from --since to today
+        start_date = parse_date_input(args.since)
+        end_date = datetime.now(timezone.utc).date()
+
+        if start_date > end_date:
+            raise SystemExit(f"Error: Start date {start_date.strftime('%d.%m.%Y')} is in the future.")
+
+        current_date = start_date
+        print(f"Processing dates from {start_date.strftime('%d.%m.%Y')} to {end_date.strftime('%d.%m.%Y')}")
+        print("=" * 80)
+
+        while current_date <= end_date:
+            process_date(current_date)
+            print("-" * 80)
+            current_date += timedelta(days=1)
+
+        print(f"\nCompleted processing {(end_date - start_date).days + 1} days.")
+    else:
+        # Process single date (original behavior)
+        target_date = parse_date_input(args.date)
+        process_date(target_date)
 
 if __name__ == "__main__":
     main()
