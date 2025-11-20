@@ -16,6 +16,8 @@ TAGS_PROP = "Tags"         # A 'Multi-select' property for tags
 # Pages created on the given date will be processed, and any marked as finished
 # on that date also. This property name defines those finished pages.
 FINISH_BEFORE_PROP = "Finish Before" # The name of your custom date property
+SUB_ITEM_PROP = "Sub-item"  # The name of your relation property for sub-items
+PARENT_ITEM_PROP = "Parent item" # The name of your relation property for parent item
 
 # --- Environment Variable Setup ---
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
@@ -33,7 +35,9 @@ except Exception as e:
     raise SystemExit(f"Error initializing Notion client: {e}")
 
 # Regex to find "TODO" and its synonyms at the beginning of a line (after spaces/punctuation), case-insensitive
-TODO_PATTERNS = re.compile(r"^[\s\W]*(todo|to-?do|to do|todo:|to-do:)\b", re.IGNORECASE)
+TODO_DETECT = re.compile(r"^[\s\W]*(todo|to-?do|to\s+do)\b", re.IGNORECASE)
+# Regex to remove "TODO" keyword and following colons/spaces ONLY from the beginning of a line
+TODO_REMOVE = re.compile(r"^[\s\W]*(todo|to-?do|to\s+do)[\s:]*", re.IGNORECASE)
 
 def parse_date_input(date_str: str | None) -> datetime.date:
     """Parses a 'dd.mm.yyyy' string into a date object. Defaults to today's date (UTC) if None."""
@@ -106,8 +110,8 @@ def mark_todo_as_done(block: dict):
     new_rich_text = []
     for text_obj in original_rich_text:
         original_content = text_obj.get("text", {}).get("content", "")
-        # Replace only the first occurrence of a TODO pattern in the text segment
-        modified_content = TODO_PATTERNS.sub("DONE", original_content, count=1)
+        # Replace only the first occurrence of a TODO pattern with DONE
+        modified_content = TODO_REMOVE.sub("DONE ", original_content, count=1)
         
         # Create a new text object; do not modify the original in place
         new_text_obj = text_obj.copy()
@@ -162,7 +166,7 @@ def check_for_duplicate_todo(todo_text: str, source_page_id: str):
         print(f"Warning: Could not check for duplicates due to API error: {e}")
         return False # Fail open to allow creation
 
-def create_todo_page(source_page: dict, todo_text: str, counter: int) -> bool:
+def create_todo_page(source_page: dict, todo_text: str) -> bool:
     """Creates a new page in the database for a found TODO item.
     	returns True on success, False on failure.
 	"""
@@ -171,11 +175,14 @@ def create_todo_page(source_page: dict, todo_text: str, counter: int) -> bool:
     source_page_url = source_page.get("url", f"https://www.notion.so/{source_page_id.replace('-', '')}")
 
     # Remove the TODO keyword from the text for the page content
-    clean_text = TODO_PATTERNS.sub("", todo_text).strip()
-    # Remove leading colon or hyphen if present after TODO removal
+    # First strip leading/trailing whitespace, then remove TODO pattern
+    clean_text = todo_text.strip()
+    # Remove TODO and everything before it (like leading punctuation), keep everything after
+    clean_text = TODO_REMOVE.sub("", clean_text).strip()
+    # Remove any remaining leading punctuation (colon, hyphen, etc.) and whitespace
     clean_text = re.sub(r"^[:\-\s]+", "", clean_text).strip()
 
-    new_page_title = f"TODO {clean_text} {counter:02d}"
+    new_page_title = f"{clean_text}"
 
     print(f"  - Found TODO: '{clean_text}'")
 
@@ -184,14 +191,26 @@ def create_todo_page(source_page: dict, todo_text: str, counter: int) -> bool:
     #    print("    -> Skipping, duplicate already exists.")
     #    return
 
+    # Get the parent item from the source page (if it exists)
+    source_properties = source_page.get("properties", {})
+    parent_relation = source_properties.get(PARENT_ITEM_PROP, {}).get("relation", [])
+
+    # Build properties for the new page
+    new_page_properties = {
+        TITLE_PROP: {"title": [{"text": {"content": new_page_title}}]},
+        TYPE_PROP: {"select": {"name": "To-Do"}},
+        TAGS_PROP: {"multi_select": [{"name": "Auto Generated"}]},
+        PARENT_ITEM_PROP: {"relation": [{"id": source_page_id}]}  # Set source page as parent
+    }
+
+    # If source page has a parent, inherit it
+    if parent_relation:
+        new_page_properties[PARENT_ITEM_PROP] = {"relation": parent_relation}
+
     try:
-        client.pages.create(
+        new_page = client.pages.create(
             parent={"database_id": NOTION_DATABASE_ID},
-            properties={
-                TITLE_PROP: {"title": [{"text": {"content": new_page_title}}]},
-                TYPE_PROP: {"select": {"name": "To-Do"}},
-                TAGS_PROP: {"multi_select": [{"name": "Auto Generated"}]},
-            },
+            properties=new_page_properties,
             children=[
                 {
                     "object": "block",
@@ -213,6 +232,25 @@ def create_todo_page(source_page: dict, todo_text: str, counter: int) -> bool:
             ],
         )
         print("    -> Created new To-Do page.")
+
+        # Update the source page to add this new page to its Sub-item relation
+        new_page_id = new_page["id"]
+        try:
+            # Get current sub-items from source page
+            current_sub_items = source_properties.get(SUB_ITEM_PROP, {}).get("relation", [])
+            # Add the new page to the sub-items list
+            updated_sub_items = current_sub_items + [{"id": new_page_id}]
+
+            client.pages.update(
+                page_id=source_page_id,
+                properties={
+                    SUB_ITEM_PROP: {"relation": updated_sub_items}
+                }
+            )
+            print("    -> Added to source page as sub-item.")
+        except APIResponseError as e:
+            print(f"    -> Warning: Could not update source page sub-items. Error: {e}")
+
         return True # Return True on success
     except APIResponseError as e:
         print(f"    -> Failed to create page. Error: {e}")
@@ -244,23 +282,21 @@ def process_date(target_date):
         print(f"Scanning page: '{page_title}'")
 
         blocks = get_page_blocks(page["id"])
-        todo_counter = 1
         found_todos = False
 
         for block in blocks:
             text_content = extract_text_from_block(block)
             for line in text_content.splitlines():
-                if TODO_PATTERNS.search(line):
+                if TODO_DETECT.search(line):
                     found_todos = True
                     # Clean up the line by removing checkbox syntax and extra whitespace
                     clean_line = re.sub(r"^\s*\[\s*[xX]?\s*\]\s*", "", line).strip()
 	                # Step 1: Try to create the new To-Do page
-                    is_successful = create_todo_page(page, clean_line, todo_counter)
+                    is_successful = create_todo_page(page, clean_line)
 
         	        # Step 2: If successful, update the original block
                     if is_successful:
                         mark_todo_as_done(block)
-                        todo_counter += 1
 
         if not found_todos:
             print("  - No TODOs found on this page.")
