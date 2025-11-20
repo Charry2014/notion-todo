@@ -32,8 +32,8 @@ try:
 except Exception as e:
     raise SystemExit(f"Error initializing Notion client: {e}")
 
-# Regex to find "TODO" and its synonyms, case-insensitive
-TODO_PATTERNS = re.compile(r"\b(todo|to-?do|to do|todo:|to-do:)\b", re.IGNORECASE)
+# Regex to find "TODO" and its synonyms at the beginning of a line (after spaces/punctuation), case-insensitive
+TODO_PATTERNS = re.compile(r"^[\s\W]*(todo|to-?do|to do|todo:|to-do:)\b", re.IGNORECASE)
 
 def parse_date_input(date_str: str | None) -> datetime.date:
     """Parses a 'dd.mm.yyyy' string into a date object. Defaults to today's date (UTC) if None."""
@@ -170,9 +170,14 @@ def create_todo_page(source_page: dict, todo_text: str, counter: int) -> bool:
     source_page_title = get_page_title(source_page)
     source_page_url = source_page.get("url", f"https://www.notion.so/{source_page_id.replace('-', '')}")
 
-    new_page_title = f"TODO {todo_text} {counter:02d}"
+    # Remove the TODO keyword from the text for the page content
+    clean_text = TODO_PATTERNS.sub("", todo_text).strip()
+    # Remove leading colon or hyphen if present after TODO removal
+    clean_text = re.sub(r"^[:\-\s]+", "", clean_text).strip()
 
-    print(f"  - Found TODO: '{todo_text}'")
+    new_page_title = f"TODO {clean_text} {counter:02d}"
+
+    print(f"  - Found TODO: '{clean_text}'")
 
     # Duplicate check is currently disabled to avoid false negatives.
     #if check_for_duplicate_todo(todo_text, source_page_id):
@@ -192,7 +197,7 @@ def create_todo_page(source_page: dict, todo_text: str, counter: int) -> bool:
                     "object": "block",
                     "type": "paragraph",
                     "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": todo_text}}]
+                        "rich_text": [{"type": "text", "text": {"content": clean_text}}]
                     },
                 },
                 {
@@ -218,13 +223,19 @@ def process_date(target_date):
     print(f"Scanning Notion database for pages created on: {target_date.strftime('%d.%m.%Y')}")
 
     target_iso_date = target_date.isoformat()
-    # Use server side filtering
+    # Use server side filtering - exclude auto-generated pages to prevent infinite loops
     date_filter = {
-        "or": [
-            # Condition 1: The built-in 'Created time' property matches the date.
-            {"property": "Created", "created_time": {"equals": target_iso_date}},
-            # Condition 2: The custom 'Finish Before' date property matches the date.
-            {"property": FINISH_BEFORE_PROP, "date": {"equals": target_iso_date}}
+        "and": [
+            {
+                "or": [
+                    # Condition 1: The built-in 'Created time' property matches the date.
+                    {"property": "Created", "created_time": {"equals": target_iso_date}},
+                    # Condition 2: The custom 'Finish Before' date property matches the date.
+                    {"property": FINISH_BEFORE_PROP, "date": {"equals": target_iso_date}}
+                ]
+            },
+            # Exclude pages tagged as "Auto Generated"
+            {"property": TAGS_PROP, "multi_select": {"does_not_contain": "Auto Generated"}}
         ]
     }
 
