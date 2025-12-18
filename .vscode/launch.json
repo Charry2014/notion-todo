@@ -11,7 +11,7 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "args": ["--since", "02.12.2025"]
+            "args": ["--since", "18.12.2025"]
         }
     ]
 }

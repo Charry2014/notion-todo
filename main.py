@@ -166,10 +166,13 @@ def check_for_duplicate_todo(todo_text: str, source_page_id: str):
         print(f"Warning: Could not check for duplicates due to API error: {e}")
         return False # Fail open to allow creation
 
-def create_todo_page(source_page: dict, todo_text: str) -> bool:
+def create_todo_page(source_page: dict, todo_text: str, following_list_blocks: list = None) -> bool:
     """Creates a new page in the database for a found TODO item.
     	returns True on success, False on failure.
 	"""
+    if following_list_blocks is None:
+        following_list_blocks = []
+
     source_page_id = source_page["id"]
     source_page_title = get_page_title(source_page)
     source_page_url = source_page.get("url", f"https://www.notion.so/{source_page_id.replace('-', '')}")
@@ -207,29 +210,51 @@ def create_todo_page(source_page: dict, todo_text: str) -> bool:
     if parent_relation:
         new_page_properties[PARENT_ITEM_PROP] = {"relation": parent_relation}
 
+    # Build the children blocks for the new page
+    children_blocks = [
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {
+                "rich_text": [{"type": "text", "text": {"content": clean_text}}]
+            },
+        },
+    ]
+
+    # Add any following list items from the source page
+    for list_block in following_list_blocks:
+        block_type = list_block.get("type")
+        if block_type in ("bulleted_list_item", "numbered_list_item"):
+            # Copy the rich_text content from the original block
+            original_rich_text = list_block.get(block_type, {}).get("rich_text", [])
+            children_blocks.append({
+                "object": "block",
+                "type": block_type,
+                block_type: {
+                    "rich_text": original_rich_text
+                }
+            })
+
+    # Add the source link at the end
+    children_blocks.append({
+        "object": "block",
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": [
+                {"type": "text", "text": {"content": "Source: "}},
+                {"type": "text", "text": {"content": "Link to original page", "link": {"url": source_page_url}}},
+            ]
+        },
+    })
+
+    if following_list_blocks:
+        print(f"    -> Including {len(following_list_blocks)} list item(s)")
+
     try:
         new_page = client.pages.create(
             parent={"database_id": NOTION_DATABASE_ID},
             properties=new_page_properties,
-            children=[
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [{"type": "text", "text": {"content": clean_text}}]
-                    },
-                },
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [
-                            {"type": "text", "text": {"content": "Source: "}},
-                            {"type": "text", "text": {"content": "Link to original page", "link": {"url": source_page_url}}},
-                        ]
-                    },
-                },
-            ],
+            children=children_blocks,
         )
         print("    -> Created new To-Do page.")
 
@@ -284,19 +309,34 @@ def process_date(target_date):
         blocks = get_page_blocks(page["id"])
         found_todos = False
 
-        for block in blocks:
+        # List block types that should be collected as sub-items
+        list_block_types = {"bulleted_list_item", "numbered_list_item"}
+
+        i = 0
+        while i < len(blocks):
+            block = blocks[i]
             text_content = extract_text_from_block(block)
             for line in text_content.splitlines():
                 if TODO_DETECT.search(line):
                     found_todos = True
                     # Clean up the line by removing checkbox syntax and extra whitespace
                     clean_line = re.sub(r"^\s*\[\s*[xX]?\s*\]\s*", "", line).strip()
-	                # Step 1: Try to create the new To-Do page
-                    is_successful = create_todo_page(page, clean_line)
 
-        	        # Step 2: If successful, update the original block
+                    # Collect following list items
+                    following_list_blocks = []
+                    j = i + 1
+                    while j < len(blocks) and blocks[j].get("type") in list_block_types:
+                        following_list_blocks.append(blocks[j])
+                        j += 1
+
+                    # Step 1: Try to create the new To-Do page with list items
+                    is_successful = create_todo_page(page, clean_line, following_list_blocks)
+
+                    # Step 2: If successful, update the original block
                     if is_successful:
                         mark_todo_as_done(block)
+                    break  # Only process the first TODO line per block
+            i += 1
 
         if not found_todos:
             print("  - No TODOs found on this page.")
